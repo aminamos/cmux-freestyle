@@ -42,14 +42,18 @@ const SNAPSHOT_RECOVERY_CLOCK_SKEW_MS = positiveIntFromEnv(
 
 type CloudAgentTool = {
   readonly name: string;
+  readonly kind: "npm" | "script";
   readonly flag: string;
   readonly envVar: string;
+  // For npm tools this is a full npm package spec (`name@version`). For
+  // script-installed tools it is a plain version tag (`x.y.z` or `latest`).
   readonly defaultSpec: string;
   readonly binaries: ReadonlyArray<string>;
 };
 
 const CLOUD_AGENT_TOOLS: ReadonlyArray<CloudAgentTool> = [
   {
+    kind: "npm",
     name: "claude",
     flag: "--claude-spec",
     envVar: "CMUX_CLOUD_IMAGE_CLAUDE_CODE_NPM_SPEC",
@@ -57,6 +61,7 @@ const CLOUD_AGENT_TOOLS: ReadonlyArray<CloudAgentTool> = [
     binaries: ["claude"],
   },
   {
+    kind: "npm",
     name: "opencode",
     flag: "--opencode-spec",
     envVar: "CMUX_CLOUD_IMAGE_OPENCODE_NPM_SPEC",
@@ -64,6 +69,7 @@ const CLOUD_AGENT_TOOLS: ReadonlyArray<CloudAgentTool> = [
     binaries: ["opencode"],
   },
   {
+    kind: "npm",
     name: "codex",
     flag: "--codex-spec",
     envVar: "CMUX_CLOUD_IMAGE_CODEX_NPM_SPEC",
@@ -71,11 +77,20 @@ const CLOUD_AGENT_TOOLS: ReadonlyArray<CloudAgentTool> = [
     binaries: ["codex"],
   },
   {
+    kind: "npm",
     name: "pi",
     flag: "--pi-spec",
     envVar: "CMUX_CLOUD_IMAGE_PI_NPM_SPEC",
     defaultSpec: "@earendil-works/pi-coding-agent@0.74.0",
     binaries: ["pi"],
+  },
+  {
+    kind: "script",
+    name: "muse",
+    flag: "--muse-version",
+    envVar: "CMUX_CLOUD_IMAGE_MUSE_VERSION",
+    defaultSpec: "latest",
+    binaries: ["muse"],
   },
 ];
 
@@ -240,13 +255,24 @@ function parseArgs(argv: ReadonlyArray<string>): Args {
     const raw = (flag(tool.flag) ?? process.env[tool.envVar] ?? "").trim();
     if (raw && isDisabledValue(raw)) return [];
     const packageSpec = raw || tool.defaultSpec;
-    const resolvedVersion = pinnedNpmPackageVersion(packageSpec);
-    if (!resolvedVersion) {
+    if (tool.kind === "npm") {
+      const resolvedVersion = pinnedNpmPackageVersion(packageSpec);
+      if (!resolvedVersion) {
+        throw new Error(
+          `${tool.flag}/${tool.envVar} must be an exact npm version spec (for example ${tool.defaultSpec}); got ${packageSpec}`,
+        );
+      }
+      return [{ ...tool, packageSpec, resolvedVersion }];
+    }
+    // The official Muse installer does not support version pinning (it
+    // resolves the current stable channel release); anything other than
+    // `latest` would silently install the wrong version.
+    if (packageSpec !== "latest") {
       throw new Error(
-        `${tool.flag}/${tool.envVar} must be an exact npm version spec (for example ${tool.defaultSpec}); got ${packageSpec}`,
+        `${tool.flag}/${tool.envVar}: the Muse Code CLI installer does not support pinning; use "latest" (got ${packageSpec})`,
       );
     }
-    return [{ ...tool, packageSpec, resolvedVersion }];
+    return [{ ...tool, packageSpec, resolvedVersion: packageSpec }];
   });
 
   const skipCache =
@@ -436,12 +462,25 @@ function toolInstallCommands(
   bunVersion: string,
   tools: ReadonlyArray<ResolvedAgentTool>,
 ): ReadonlyArray<string> {
-  const installAgentTools =
-    tools.length > 0
-      ? `npm install -g --omit=dev --no-audit --fund=false ${tools
-          .map((tool) => shellQuote(tool.packageSpec))
-          .join(" ")} >/tmp/cmux-npm-install.txt 2>&1`
-      : "true";
+  const npmTools = tools.filter((tool) => tool.kind === "npm");
+  const scriptTools = tools.filter((tool) => tool.kind === "script");
+  const installAgentTools = npmTools.length
+    ? `npm install -g --omit=dev --no-audit --fund=false ${npmTools
+        .map((tool) => shellQuote(tool.packageSpec))
+        .join(" ")} >/tmp/cmux-npm-install.txt 2>&1`
+    : "true";
+  // Script-installed tools use their official installer script. The Muse
+  // installer resolves the current stable channel release document (no
+  // version pinning support); a specific version is rejected in parseArgs.
+  // Installing to MUSE_INSTALL_DIR=/usr/local/bin keeps the binary on PATH for
+  // all users and skips shell-rc path fixup. Non-interactive: browser/device
+  // login is skipped when stderr is not a TTY. Idempotent: rerunning replaces
+  // the launcher only if it changed and skips redundant binary downloads.
+  const installScriptTools = scriptTools.map((tool) => [
+    `curl -fsSL --retry 3 --proto '=https' --tlsv1.2 https://dev.meta.ai/install.sh -o /tmp/${tool.name}-install.sh`,
+    `MUSE_INSTALL_DIR=/usr/local/bin bash /tmp/${tool.name}-install.sh >/tmp/cmux-${tool.name}-install.txt 2>&1`,
+    `rm -f /tmp/${tool.name}-install.sh`,
+  ]).flat();
   return [
     "install -d -m 0755 /etc/apt/keyrings",
     "rm -f /etc/apt/keyrings/nodesource.gpg",
@@ -454,6 +493,7 @@ function toolInstallCommands(
     bunInstallCommand(bunVersion),
     "ln -sf /usr/local/bin/bun /usr/local/bin/bunx",
     installAgentTools,
+    ...installScriptTools,
     "rm -rf /root/.npm/_cacache /var/lib/apt/lists/*",
   ];
 }

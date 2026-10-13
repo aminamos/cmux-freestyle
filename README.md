@@ -67,10 +67,11 @@ Set these as flags on `./setup.sh` or as env vars:
 | `--codex-spec <npm-spec>` | `CMUX_CLOUD_IMAGE_CODEX_NPM_SPEC` | matches cmux pin | Use `none` to skip Codex. |
 | `--opencode-spec <npm-spec>` | `CMUX_CLOUD_IMAGE_OPENCODE_NPM_SPEC` | matches cmux pin | Use `none` to skip OpenCode. |
 | `--pi-spec <npm-spec>` | `CMUX_CLOUD_IMAGE_PI_NPM_SPEC` | matches cmux pin | Use `none` to skip Pi. |
+| `--muse-version <latest>` | `CMUX_CLOUD_IMAGE_MUSE_VERSION` | `latest` | Muse Code CLI, installed via its official script (`https://dev.meta.ai/install.sh`). Use `none` to skip Muse. |
 | `--skip-cache` | `CMUX_FREESTYLE_SKIP_CACHE=1` | off | Forces a full Freestyle rebuild. |
 | `--json` | `CMUX_FREESTYLE_JSON=1` | off | Machine-readable JSON output. |
 
-Agent CLI specs must be exact semver pins (for example `@openai/codex@0.130.0`), matching cmux's policy. Ranges and `latest` are rejected so each rebuild is reproducible.
+Agent CLI specs must be exact semver pins (for example `@openai/codex@0.130.0`), matching cmux's policy. Ranges and `latest` are rejected so each rebuild is reproducible. Muse Code CLI is the exception: it is installed via its official install script (`https://dev.meta.ai/install.sh`) rather than npm, and the installer resolves the current stable channel release (no pinning support), so `--muse-version` accepts only `latest`; any other value fails the build.
 
 ## Using the snapshot
 
