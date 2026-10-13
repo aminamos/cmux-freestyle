@@ -49,6 +49,14 @@ type CloudAgentTool = {
   // script-installed tools it is a plain version tag (`x.y.z` or `latest`).
   readonly defaultSpec: string;
   readonly binaries: ReadonlyArray<string>;
+  // For script-installed tools: descriptor of the official installer.
+  readonly script?: {
+    readonly url: string;
+    readonly installDirEnv: string;
+    // `--ref` when the installer supports version pinning, null otherwise.
+    readonly refArg: "--ref" | null;
+    readonly extraArgs: string;
+  };
 };
 
 const CLOUD_AGENT_TOOLS: ReadonlyArray<CloudAgentTool> = [
@@ -65,7 +73,7 @@ const CLOUD_AGENT_TOOLS: ReadonlyArray<CloudAgentTool> = [
     name: "opencode",
     flag: "--opencode-spec",
     envVar: "CMUX_CLOUD_IMAGE_OPENCODE_NPM_SPEC",
-    defaultSpec: "opencode-ai@1.14.41",
+    defaultSpec: "@opencode/cli@2.0.28",
     binaries: ["opencode"],
   },
   {
@@ -91,6 +99,26 @@ const CLOUD_AGENT_TOOLS: ReadonlyArray<CloudAgentTool> = [
     envVar: "CMUX_CLOUD_IMAGE_MUSE_VERSION",
     defaultSpec: "latest",
     binaries: ["muse"],
+    script: {
+      url: "https://dev.meta.ai/install.sh",
+      installDirEnv: "MUSE_INSTALL_DIR",
+      refArg: null,
+      extraArgs: "",
+    },
+  },
+  {
+    kind: "script",
+    name: "omp",
+    flag: "--omp-version",
+    envVar: "CMUX_CLOUD_IMAGE_OMP_VERSION",
+    defaultSpec: "v18.10.3",
+    binaries: ["omp"],
+    script: {
+      url: "https://omp.sh/install",
+      installDirEnv: "PI_INSTALL_DIR",
+      refArg: "--ref",
+      extraArgs: "--binary",
+    },
   },
 ];
 
@@ -263,6 +291,18 @@ function parseArgs(argv: ReadonlyArray<string>): Args {
         );
       }
       return [{ ...tool, packageSpec, resolvedVersion }];
+    }
+    // Script tools: installers that support pinning (refArg set) accept an
+    // exact `x.y.z` or `vX.Y.Z` version (normalized to a v-prefix). Those
+    // without pinning support must use `latest`.
+    if (tool.script && tool.script.refArg) {
+      const match = /^v?(\d+\.\d+\.\d+)$/.exec(packageSpec);
+      if (!match) {
+        throw new Error(
+          `${tool.flag}/${tool.envVar} must be an exact script-tool version like ${tool.defaultSpec} or "latest"; got ${packageSpec}`,
+        );
+      }
+      return [{ ...tool, packageSpec, resolvedVersion: `v${match[1]}` }];
     }
     // The official Muse installer does not support version pinning (it
     // resolves the current stable channel release); anything other than
@@ -469,18 +509,27 @@ function toolInstallCommands(
         .map((tool) => shellQuote(tool.packageSpec))
         .join(" ")} >/tmp/cmux-npm-install.txt 2>&1`
     : "true";
-  // Script-installed tools use their official installer script. The Muse
-  // installer resolves the current stable channel release document (no
-  // version pinning support); a specific version is rejected in parseArgs.
-  // Installing to MUSE_INSTALL_DIR=/usr/local/bin keeps the binary on PATH for
-  // all users and skips shell-rc path fixup. Non-interactive: browser/device
-  // login is skipped when stderr is not a TTY. Idempotent: rerunning replaces
-  // the launcher only if it changed and skips redundant binary downloads.
-  const installScriptTools = scriptTools.map((tool) => [
-    `curl -fsSL --retry 3 --proto '=https' --tlsv1.2 https://dev.meta.ai/install.sh -o /tmp/${tool.name}-install.sh`,
-    `MUSE_INSTALL_DIR=/usr/local/bin bash /tmp/${tool.name}-install.sh >/tmp/cmux-${tool.name}-install.txt 2>&1`,
-    `rm -f /tmp/${tool.name}-install.sh`,
-  ]).flat();
+  // Script-installed tools use their official installer script, downloaded to a
+  // file first (never piped straight into bash). Installers that support
+  // version pinning get `--ref <version>`; the installer dir env
+  // (e.g. MUSE_INSTALL_DIR/PI_INSTALL_DIR=/usr/local/bin) keeps the binary on
+  // PATH for all users. Non-interactive: browser/device login is skipped when
+  // stderr is not a TTY. Idempotent: rerunning replaces the launcher only if
+  // it changed and skips redundant binary downloads.
+  const installScriptTools = scriptTools.map((tool) => {
+    if (!tool.script) {
+      throw new Error(`script tool ${tool.name} is missing its installer descriptor`);
+    }
+    const args = [
+      tool.script.extraArgs,
+      tool.script.refArg ? `${tool.script.refArg} ${tool.resolvedVersion}` : "",
+    ].filter(Boolean).join(" ");
+    return [
+      `curl -fsSL --retry 3 --proto '=https' --tlsv1.2 ${tool.script.url} -o /tmp/${tool.name}-install.sh`,
+      `${tool.script.installDirEnv}=/usr/local/bin bash /tmp/${tool.name}-install.sh${args ? ` ${args}` : ""} >/tmp/cmux-${tool.name}-install.txt 2>&1`,
+      `rm -f /tmp/${tool.name}-install.sh`,
+    ];
+  }).flat();
   return [
     "install -d -m 0755 /etc/apt/keyrings",
     "rm -f /etc/apt/keyrings/nodesource.gpg",
